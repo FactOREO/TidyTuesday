@@ -1,0 +1,108 @@
+---
+title: "TidyTuesday week 28 - European Flights"
+date: 2022-07-17
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fastverse)
+library(ggplot2)
+library(ggtext)
+library(forecast)
+library(lubridate)
+library(fable)
+```
+
+# The Data
+
+The data is provided by EuroControl.
+
+```{r Load, echo = FALSE}
+data <- fread('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2022/2022-07-12/flights.csv')
+data <- data |> `colnames<-`(tolower(colnames(data)))
+```
+
+The variables contain information about the date as well as the number of arriving and departing flights from airports all over europe.
+
+# The graphic
+
+```{r, warning=FALSE}
+# Split the data into a list of data.tables
+apt_data <- data |>
+  fsubset(apt_name %in% c("Berlin - Brandenburg", "Dresden", "Erfurt", "Leipzig-Halle")) |>
+  fmutate(
+    flt_date = floor_date(ymd(flt_date), unit = "month")
+  ) |> 
+  fgroup_by(flt_date, apt_name) |>
+  fsummarise(
+    tot = fsum(flt_tot_1)
+  ) |>
+  fungroup() |>
+  rsplit(~ apt_name, flatten = TRUE)
+# fit the ARIMA model to each separate time series
+apt_data_short <- apt_data |> rapply2d(
+    \(x) x |> fsubset(flt_date < as.Date("2020-02-01"))
+  )
+arima <- mapply(
+  \(x) x |> fselect(tot) |> ts(start = c(2016, 1), frequency = 12) |> auto.arima(),
+  apt_data_short,
+  SIMPLIFY = FALSE)
+# get forecasts
+fcsts <- lapply(
+  arima, \(x) x |> forecast(h = 28) |> with(mean)
+  ) |>
+  lapply(
+    \(x) x |> qDT() |> `colnames<-`("flights") |>
+      fmutate(flt_date = zoo::as.Date(time(flights)))
+    )
+# create one data.table
+plot_data <- apt_data |>
+  unlist2d(idcols = "apt_name") |>
+  frename(tot = "flights") |>
+  merge.data.table(
+    y = unlist2d(fcsts, idcols = "apt_name") |> ftransform(flights = as.integer(flights)),
+    by = c("apt_name","flt_date"), all = TRUE
+  ) |>
+  frename(flights.x = "actual", flights.y = "prediction")
+
+pic <- plot_data |>
+  ggplot() +
+  theme_minimal() +
+  geom_line(aes(flt_date, actual, col = "actual")) +
+  geom_line(aes(flt_date, prediction, col = "prediction")) +
+  facet_wrap(~ apt_name, scale = "free_y", strip.position = "top") +
+  scale_color_manual(values = c("actual" = "black",
+                                "prediction" = "red")) +
+  labs(
+    title =
+      "<span style='font-size:14pt;'>
+        <span style='color:#3D3D3D;'>
+          Commercial Flights from and to East-German Airports <br>
+        </span>
+       </span>
+      <span style='font-size:11pt;'>
+        <span style='color:#3D3D3D;'>Course of</span>
+        <span style='color:#000000;'>actual</span>
+        <span style='color:#3D3D3D;'>and</span>
+        <span style='color:#FF0000;'>predicted</span> 
+        <span style='color:#3D3D3D;'>number of flights.</span>
+      </span>",
+    caption = "Data: EuroControl"
+  ) +
+  theme(
+    plot.title = element_markdown(lineheight = 1.1),
+    legend.position = "none",
+    axis.title = element_blank(),
+    strip.text = element_text(color = "#3D3D3D", face = "bold", hjust = 0),
+    strip.background = element_blank(),
+    strip.placement = "inside"
+  ) +
+  scale_y_continuous(
+    labels = scales::label_number(big.mark = ",", decimal.mark = ".")
+  )
+
+png("tidyTuesday_week28.png", width =15, height = 10, units = "cm", res = 144)
+  pic
+dev.off()
+```
